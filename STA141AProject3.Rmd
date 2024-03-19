@@ -1,0 +1,387 @@
+---
+title: "STA 141A Project"
+date: "March 18th, 2024 "
+name: "Nicholas Gallo, 915929865"
+output: html_document
+---
+# Abstract
+
+The data in this report comes from Steinmetz et. al 2019. In this report the data is visualized and then an analysis procedure is follow to generate possible models. 
+
+# Section 2: Exploratory Analysis
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+```
+
+```{r, echo=FALSE, results='hide'}
+##Loading necessary libraries
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(readr)
+library(tidyverse)
+library(caret)
+library(car)
+library(patchwork)
+library(glmnet)
+library(MASS)
+library(xgboost)
+library(pROC)
+
+source("utils.r")
+
+##Importing data and creating list where each entry is a df of that particular sessions
+session <- list()
+
+for (i in 1:18) {
+  name <- paste("session", i)
+  session[[i]] <- readRDS(paste('./Data/session', i, '.rds', sep = ''))
+  assign(name, session[[i]])
+}
+
+```
+
+```{r, echo=FALSE}
+## Checking to see what variables are listed in each session, their lengths, and their type.
+summary(session[[1]])
+```
+
+From the summary of Session 1, we see that there are 8 variables in each of the sessions, the value of the contrast to the left, the value of the contrast to the right, the feedback type which represents the mouse's decision, the mouse's name, the area in which a given neuron resides, the date of the session, the number of spikes in each bin defined by the "time" variable, and the time where each column represents a time bin.
+
+
+
+
+```{r, echo= FALSE}
+##here we create a df that binds all of the trials together with their feedback type, brain region that's most highly activated, and the percent of activations that this region represents over the sum of all regions.
+summary_list <- list()
+for (session_id in 1: 18){
+  summary_list[[session_id]] <- get_session_summary_data(session_id)
+}
+full_summary_tibble <- do.call(rbind, summary_list)
+full_summary_tibble$success <- full_summary_tibble$feedback_type == 1
+full_summary_tibble$success <- as.numeric(full_summary_tibble$success)
+full_summary_tibble$contrast_diff <- abs(full_summary_tibble$contrast_left-full_summary_tibble$contrast_right)
+full_summary_tibble <- full_summary_tibble %>% dplyr::select("contrast_left","contrast_right", "contrast_diff","success" )
+
+```
+
+```{r,echo=FALSE}
+
+##here we create a df that binds all of individual brain regions from each trial from each session together.
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_data(session_id)
+}
+full_tibble <- do.call(rbind, session_list)
+full_tibble$success <- as.numeric(full_tibble$feedback_type == 1)
+full_tibble$contrast_diff <- abs(full_tibble$contrast_left-full_tibble$contrast_right)
+
+```
+
+
+```{r, echo = FALSE}
+## Now we approach the data by the average spike rate for each bin in each trial, regardless of the brain area. Appended to the tibble are the same columns added to get_trial_data, with the addition of the session number.
+session_list = list()
+for (session_id in 1: 18){
+  session_list[[session_id]] <- get_session_functional_data(session_id)
+}
+full_functional_tibble <- as_tibble(do.call(rbind, session_list))
+full_functional_tibble$session_id <- as.factor(full_functional_tibble$session_id )
+full_functional_tibble$contrast_diff <- abs(full_functional_tibble$contrast_left-full_functional_tibble$contrast_right)
+
+full_functional_tibble$success <- full_functional_tibble$feedback_type == 1
+full_functional_tibble$success <- as.numeric(full_functional_tibble$success)
+```
+
+## Plots
+```{r, echo=FALSE}
+average_spike <- full_tibble %>% group_by( session_id, trial_id) %>% mutate(mean_spike = sum(region_sum_spike)/sum(region_count)) %>% group_by(session_id) %>% summarise(mean_session_spike = mean(mean_spike))
+
+
+n_session = 0
+n_session=length(session)
+session_summary_data <- data.frame(session_id = 0,num_of_neurons=0,num_trials = 0, brain_areas = 0, avg_spike_rate = 0, avg_success_rate = 0, mouse_name = "")
+for(i in 1:n_session){
+    tmp = session[[i]];
+    session_summary_data[i,1] = i
+    session_summary_data[i,2] = length(tmp$brain_area)
+    session_summary_data[i,3] = length(tmp$feedback_type)
+    session_summary_data[i,4] = length(unique(tmp$brain_area))
+    session_summary_data[i,5] = average_spike[i,2]
+    session_summary_data[i,6] = sum(tmp$feedback_type == 1)/sum(length(tmp$feedback_type));
+    session_summary_data[i,7] = tmp$mouse_name
+}
+p1 <- session_summary_data %>% ggplot(aes(x =session_id , y = num_of_neurons, color = mouse_name)) +
+  geom_point() +
+  labs(x = "Session ID" , y ="Total Number of Neurons", title = "Total Number of Neurons vs. Session ID") +
+  scale_x_continuous(breaks = unique(session_summary_data$session_id)) +  
+  theme_minimal()
+
+```
+
+```{r, echo=FALSE}
+p2<- session_summary_data %>% ggplot(aes(x =session_id , y = brain_areas, color = mouse_name)) +
+  geom_point() +
+  labs(x = "Session ID" , y ="Number of Unique Brain Areas", title = "Number of Unique Areas vs. Session ID") +
+  scale_x_continuous(breaks = unique(session_summary_data$session_id)) +  
+  theme_minimal()
+```
+
+```{r, echo= FALSE}
+p3 <- session_summary_data %>% ggplot(aes(x =session_id , y = avg_spike_rate, color = mouse_name)) +
+  geom_point() +
+  labs(x = "Session ID" , y ="Average Spike Rate", title = "Average Spike Rate vs. Session ID") +
+  scale_x_continuous(breaks = unique(session_summary_data$session_id)) +  
+  theme_minimal()
+```
+
+
+```{r, echo= FALSE}
+p4 <- session_summary_data %>% ggplot(aes(x =session_id , y = avg_success_rate, color = mouse_name)) +
+  geom_point() +
+  labs(x = "Session ID" , y ="Average Success Rate", title = "Average Success Rate vs. Session ID") +
+  scale_x_continuous(breaks = unique(session_summary_data$session_id)) +  
+  theme_minimal()
+```
+
+```{r, echo= FALSE}
+data_by_mouse <- full_functional_tibble %>% group_by(mouse_name) %>% summarize(success_rate = mean(success, na.rm = TRUE))
+
+p5 <- data_by_mouse %>% ggplot(aes(x =mouse_name , y = success_rate, color = mouse_name)) +
+  geom_bar(stat = "identity") +
+  labs(x = "Mouse Name" , y ="Success Rate") +  
+  theme_minimal()
+```
+
+```{r, echo= FALSE}
+data_by_contrast <- full_functional_tibble %>% group_by(contrast_diff) %>% count() %>% ungroup() %>% mutate(perc = `n` / sum(`n`)) %>% arrange(perc) %>% mutate(labels = scales::percent(perc))
+
+p6 <- data_by_contrast %>% ggplot(aes(x = contrast_diff , y = perc, color = mouse_name)) +
+  geom_bar(stat = "identity") +
+  labs(x = "contrast_diff" , y ="success_rate") +  
+  theme_minimal()
+
+```
+
+
+The plots below display the differences between the data sets for each individual session. The x-axis denotes a given session, and the y-axis denotes the session's average for that particular type of data. From examining the plots, one can see that there is no obvious correlation between session ID and total number of neurons, total number of unique brain areas, or average spike rates. However, one can see that there seems to be some kind of positive correlation between Session ID and average success rate. This warrants further investigation. 
+```{r, echo=FALSE}
+wrap_plots(p1, p2, p3, p4)
+```
+
+
+In order to see whether or not the variance among success rates is a result of the variance among the contrast differences across different mice/sessions, we fit a linear model utilizing the the mouse name, Session ID, and contrast difference as independent variables and success as the dependent variable.
+```{r, echo = FALSE}
+counts_df <- full_functional_tibble[c('mouse_name', 'contrast_diff', 'session_id')]
+
+contrast_df <- full_functional_tibble %>% group_by(contrast_diff,mouse_name,session_id) %>% count() %>% ungroup() %>% group_by(mouse_name) %>% mutate(success = `n` / sum(`n`)) %>% arrange(success)
+
+contrast_df$contrast_diff <- as.character(contrast_df$contrast_diff)
+
+mod1 <- lm(success ~ mouse_name + contrast_diff + session_id, data = contrast_df)
+anova <- Anova(mod1, type = 2)
+anova
+```
+We can see from the resulting p-values that the contrast difference is orders of magnitude more impactful than the Session ID, however the Session ID still has a high significance.
+
+```{r,echo=FALSE}
+full_functional_tibble$trial_group = cut(full_functional_tibble$trial_id, breaks = seq(0, max(full_functional_tibble$trial_id), by = 25),include.lowest = TRUE)
+levels(full_functional_tibble$trial_group) <- seq(0, max(full_functional_tibble$trial_id), by = 25)[2:18]
+
+success_rate <- aggregate(success ~ mouse_name + trial_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+p7 <- ggplot(success_rate, aes(x = trial_group, y = success)) + labs(x = 'Bin ID', y = 'Success Rate', title = 'Success Rate vs. Trial ID') +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~mouse_name) +
+      theme_bw()
+```
+
+
+## Section 3: Data integration
+
+In order to compare the data across sessions and trials, which as noted above have differing numbers of brain areas, trials, and total neuron count, we will create a metric that describes the amount of neurons spiking at different time points along the trial. This variable is denoted as ``average_spike`` and is the result of total number of neurons firing in a given bin divided by total number of neurons in that same trial.
+
+```{r,echo=FALSE}
+col_names <-names(full_functional_tibble)
+region_sum_subset <- col_names[grep("^region_sum", col_names)]
+region_mean_subset <- col_names[grep("^region_mean", col_names)]
+```
+
+```{r,echo=FALSE}
+success_rate <- aggregate(success ~ session_id + trial_group, data = full_functional_tibble, FUN = function(x) mean(x) )
+p8 <- ggplot(success_rate, aes(x = trial_group, y = success)) + labs(x = 'Trial Bin', y = 'Success Rate', title = 'Success Rate vs. Trial Bin') +
+  geom_bar(stat = "identity", position = "dodge") +
+  facet_wrap(~session_id, ncol=3) +
+      theme_bw()
+
+average_spike <- full_tibble %>% group_by( session_id,trial_id) %>% summarise(mean_spike = sum(region_sum_spike)/sum(region_count))
+
+average_spike$mouse_name <- full_functional_tibble$mouse_name
+average_spike$contrast_diff <- full_functional_tibble$contrast_diff
+average_spike$success <- full_functional_tibble$success
+```
+
+```{r,echo=FALSE}
+p9 <- ggplot(average_spike, aes(x = trial_id, y = mean_spike)) + 
+  geom_line()+ labs(x = 'Trial ID', y = 'Mean Spike Rate', title = 'Mean Spike Rate vs. Trial ID') +
+  geom_smooth(method = "loess")+  # Fit a smooth spline
+  facet_wrap(~session_id)
+```
+
+```{r,echo=FALSE}
+p10 <- ggplot(average_spike, aes(x = trial_id, y = mean_spike)) + 
+  geom_line()+ labs(x = 'Trial ID', y = 'Mean Spike Rate', title = 'Mean Spike Rate vs. Trial ID') +
+  geom_smooth(method = "loess")+  # Fit a smooth spline
+  facet_wrap(~mouse_name)
+
+p7
+p8
+p9
+p10
+
+
+full_functional_tibble$mean_spike <- average_spike$mean_spike
+```
+
+## Section 4: Predictive Modeling
+
+From the trends noted in the EDA, we will choose the average spike rate of each bin, trial_id, contrast_diff, success, trial_id, and mean_spike rate.
+
+## This starts with dividing the data into test and train.
+```{r, echo= FALSE}
+dat <- full_functional_tibble %>% dplyr::select(-date_exp,-session_id,-feedback_type, -mouse_name,-trial_group, -contrast_left, -contrast_right)
+dat$success <- as.factor(dat$success)
+dat$trial_id <- as.numeric(dat$trial_id)
+n_obs = length(dat$success)
+label <- as.numeric(full_functional_tibble$success)
+set.seed(101)
+sample <- sample.int(n = n_obs, size = floor(.8 * n_obs), replace = F)
+train <- dat[sample, ]
+test  <- dat[-sample, ]
+```
+
+## Now we will test fit a simple logistic regression as a baseline.
+```{r, echo = FALSE}
+mod1 <- glm(success~., data = train, family="binomial")
+summary(mod1)
+
+pred1 <- predict(mod1, test %>% dplyr::select(-success), type = 'response')
+prediction1 <- factor(pred1 > 0.5, labels = c('0', '1'))
+mean(prediction1 == test$success)
+
+cm <- confusionMatrix(prediction1, test$success, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+pred0 <- factor(rep('1', nrow(test)), levels = c('0', '1'))
+mean(pred0 == test$success)
+
+cm <- confusionMatrix(pred0, test$success, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+
+train$success <- as.numeric(train$success)
+test$success <- as.numeric(test$success)
+PCA <- prcomp(train[,-43], center = TRUE, scale. = TRUE)
+summary(PCA)
+plot(PCA, type = "l")
+trg <- as.data.frame(predict(PCA,train))
+trg <- data.frame(trg, train[43])
+tst <- as.data.frame(predict(PCA, test))
+tst <- data.frame(tst, test[43])
+mod2 <- glm(success ~ PC1 + PC2, data =trg )
+
+pred2 <- predict(mod2,tst)-1
+prediction2 <- factor(pred2 > 0.5, labels = c('0', '1'))
+
+mean(prediction2 != test$success)
+
+
+
+```
+```{r}
+library(ROCR)
+# Model 1
+pr = prediction(pred1, test$success)
+prf <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc <- performance(pr, measure = "auc")
+auc <- auc@y.values[[1]]
+
+# Model 2
+pr = prediction(pred2, test$success)
+prf2 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc2 <- performance(pr, measure = "auc")
+auc2 <- auc2@y.values[[1]]
+
+# Bias Guess
+pred0 = pred1 * 0 + 1
+pr = prediction(pred0, test$success)
+prf0 <- performance(pr, measure = "tpr", x.measure = "fpr")
+auc0 <- performance(pr, measure = "auc")
+auc0 <- auc0@y.values[[1]]
+
+plot(prf2, ,col = 'red', main = 'ROC curve')
+plot(prf, add = TRUE, col = 'blue')
+plot(prf0, add = TRUE, col = 'green')
+legend("bottomright", legend=c("Model 1", "Model 2", "Bias Guess"), col=c("blue", "red", 'green'), lty=1:1, 
+       cex=0.8)
+print(c("auc,auc0,auc2"))
+```
+## Section 5: Prediction performance on the test sets
+
+trt <- list()
+for (i in 1:2) {
+  name <- paste("test", i)
+  trt[[i]] <- readRDS(paste('./Data/test', i, '.rds', sep = ''))
+  assign(name, trt[[i]])
+}
+test_list = list()
+for (test_id in 1:2){
+  test_list[[test_id]] <- get_test_functional_data(test_id)
+}
+test_tibble <- as_tibble(do.call(rbind, test_list))
+test_tibble$test_id <- as.factor(test_tibble$test_id )
+test_tibble$contrast_diff <- abs(test_tibble$contrast_left-test_tibble$contrast_right)
+
+test_tibble$success <- test_tibble$feedback_type == 1
+test_tibble$success <- as.numeric(test_tibble$success)
+
+
+tt <- test_tibble %>% dplyr::select(-date_exp,-feedback_type, -mouse_name, -contrast_left, -contrast_right)
+tt$success <- as.factor(tt$success)
+tt$trial_id <- as.numeric(tt$trial_id)
+
+pred1 <- predict(mod1, tt %>% dplyr::select(-success), type = 'response')
+prediction1 <- factor(pred1 > 0.5, labels = c('0', '1'))
+mean(prediction1 == test$success)
+
+cm <- confusionMatrix(prediction1, tt$success, dnn = c("Prediction", "Reference"))
+
+plt <- as.data.frame(cm$table)
+
+ggplot(plt, aes(Reference, Prediction, fill= Freq)) +
+        geom_tile() + geom_text(aes(label=Freq)) +
+        scale_fill_gradient(low="white", high="#009194") +
+        labs(x = "Reference",y = "Prediction") +
+        scale_x_discrete(labels=c("0","1")) +
+        scale_y_discrete(labels=c("0","1"))
+
+## Section 6: Discussion
+Unfortunately I was not able to get my model to work for the test data. I could not diagnose the issue on the test day. However, I did split the training data in to trial and train data so the performance of my various models are view able there.
+
+
